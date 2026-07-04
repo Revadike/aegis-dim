@@ -2,7 +2,7 @@
 // @name         DIM Aegis Overlay
 // @namespace    Revadike
 // @author       Revadike
-// @version      1.2.2
+// @version      1.3.0
 // @description  Overlays Aegis weapon tier list data on DIM item popups
 // @match        https://app.destinyitemmanager.com/*
 // @match        https://beta.destinyitemmanager.com/*
@@ -12,6 +12,7 @@
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
+// @grant        GM_info
 // @connect      docs.google.com
 // @run-at       document-idle
 // ==/UserScript==
@@ -19,6 +20,7 @@
 (function () {
   'use strict';
 
+  const SCRIPT_VERSION = GM_info?.version || GM_info?.script?.version || '0';
   const SHEET_ID = '1JM-0SlxVDAi-C6rGVlLxa-J1WGewEeL8Qvq4htWZHhY';
   const CACHE_TTL = 24 * 60 * 60 * 1000;
   const AEGIS_ATTR = 'data-dim-aegis';
@@ -31,6 +33,15 @@
   ];
 
   const ENERGY_TYPES = ['Kinetic', 'Stasis', 'Solar', 'Arc', 'Void', 'Strand'];
+
+  // Invalidate cached sheet data when script version changes
+  if (GM_getValue('aegis_version', null) !== SCRIPT_VERSION) {
+    for (const tab of ALL_TABS) {
+      GM_setValue(`aegis_data_${tab}`, null);
+      GM_setValue(`aegis_ts_${tab}`, 0);
+    }
+    GM_setValue('aegis_version', SCRIPT_VERSION);
+  }
 
   GM_addStyle(`
     .aegis-badges {
@@ -128,6 +139,12 @@
     .aegis-highlight {
       color: var(--theme-accent-primary, #e8a534);
     }
+    .aegis-clickable {
+      cursor: pointer;
+    }
+    .aegis-clickable:hover {
+      text-decoration: underline;
+    }
   `);
 
   const parseCSV = (rawText) => {
@@ -165,27 +182,14 @@
   /** In-memory cache to avoid re-parsing GM storage on every lookup. */
   const memCache = new Map();
 
-  const getSheet = async (tab) => {
-    if (memCache.has(tab)) return memCache.get(tab);
-    const dk = `aegis_data_${tab}`, tk = `aegis_ts_${tab}`;
-    const stored = GM_getValue(dk, null);
-    if (stored && Date.now() - GM_getValue(tk, 0) < CACHE_TTL) {
-      const rows = JSON.parse(stored);
-      memCache.set(tab, rows);
-      return rows;
-    }
-    const rows = await fetchSheet(tab);
-    GM_setValue(dk, JSON.stringify(rows));
-    GM_setValue(tk, Date.now());
-    memCache.set(tab, rows);
-    return rows;
-  };
-
   const buildIdx = (rows) =>
     Object.fromEntries((rows[0] ?? []).map((col, i) => [col, i]));
 
   const normName = (s) =>
     (s ?? '').split('\n')[0].trim().toLowerCase();
+
+  const canonicalWeaponKey = (name) =>
+    normName(stripEdition((name ?? '').split('\n')[0].trim()));
 
   /** Strip edition suffixes like "(Adept)" or "(Timelost)" from a weapon name. */
   const stripEdition = (name) =>
@@ -195,6 +199,117 @@
     if (!raw) return '';
     const overrides = { 'Rapid-Fire Frame': 'Rapid', 'Rapid-Fire': 'Rapid' };
     return overrides[raw] ?? raw.replace(/ Frame$/, '').trim();
+  };
+
+  /**
+   * Get a column value by trying multiple possible column name variants.
+   * Handles sheets where headers differ (e.g. "Perk 1" vs "PERKS Perk 1").
+   * @param {string[]} row
+   * @param {Record<string,number>} idx
+   * @param {...string} keys
+   * @returns {string}
+   */
+  const getCol = (row, idx, ...keys) => {
+    for (const k of keys) {
+      if (idx[k] !== undefined) return (row[idx[k]] ?? '').trim();
+    }
+    return '';
+  };
+
+  /** Rank as a number; Infinity when the cell is blank. */
+  const getRowRank = (row, idx) => {
+    const s = (row[idx['Rank']] ?? '').trim();
+    return s ? Number(s) : Infinity;
+  };
+
+  /**
+   * Score a row by how many of the key perk/analysis fields are filled.
+   * Used as a tiebreaker when ranks are equal.
+   */
+  const getRowEssentialScore = (row, idx) => {
+    return [
+      getCol(row, idx, 'Perk 1', 'PERKS Perk 1'),
+      (row[idx['Perk 2']] ?? '').trim(),
+      (row[idx['Origin Trait']] ?? '').trim(),
+      (row[idx['ANALYSIS Notes']] ?? '').trim(),
+      (row[idx['Tier']] ?? '').trim(),
+    ].filter(Boolean).length;
+  };
+
+  /**
+   * Returns true if candidateRow should replace currentRow.
+   * Primary: more essential fields filled. Secondary: lower rank number.
+   * @param {string[]} candidateRow
+   * @param {Record<string,number>} candidateIdx
+   * @param {string[]} currentRow
+   * @param {Record<string,number>} currentIdx
+   */
+  const isBetterRow = (candidateRow, candidateIdx, currentRow, currentIdx) => {
+    const cs = getRowEssentialScore(candidateRow, candidateIdx);
+    const es = getRowEssentialScore(currentRow, currentIdx);
+    if (cs !== es) return cs > es;
+    return getRowRank(candidateRow, candidateIdx) < getRowRank(currentRow, currentIdx);
+  };
+
+  /**
+   * Deduplicate rows within a sheet by base weapon name, merging complementary entries.
+   * Rows are sorted by rank (ascending, unranked last), then fields are filled in from
+   * subsequent rows wherever the base row has an empty cell. This handles the common
+   * pattern where one entry has rank/tier and another has the actual perk data.
+   * @param {string[][]} rows
+   * @returns {string[][]}
+   */
+  const preprocessRows = (rows) => {
+    if (!rows || rows.length < 2) return rows;
+    const idx = buildIdx(rows);
+    const ni = idx['Name'];
+    if (ni === undefined) return rows;
+
+    const groups = new Map();
+    for (const row of rows.slice(1)) {
+      const rawName = (row[ni] ?? '').trim();
+      if (!rawName) continue;
+      const key = canonicalWeaponKey(rawName);
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+
+    const merged = [];
+    for (const group of groups.values()) {
+      // Put ranked rows first so rank/tier come from the canonical entry
+      const sorted = [...group].sort((a, b) => getRowRank(a, idx) - getRowRank(b, idx));
+      const base = [...sorted[0]];
+      for (let i = 1; i < sorted.length; i++) {
+        const other = sorted[i];
+        const len = Math.max(base.length, other.length);
+        for (let col = 0; col < len; col++) {
+          if (!(base[col] ?? '').trim() && (other[col] ?? '').trim()) {
+            base[col] = other[col];
+          }
+        }
+      }
+      merged.push(base);
+    }
+
+    return [rows[0], ...merged];
+  };
+
+  const getSheet = async (tab) => {
+    if (memCache.has(tab)) return memCache.get(tab);
+    const dk = `aegis_data_${tab}`, tk = `aegis_ts_${tab}`;
+    const stored = GM_getValue(dk, null);
+    if (stored && Date.now() - GM_getValue(tk, 0) < CACHE_TTL) {
+      const rows = JSON.parse(stored);
+      memCache.set(tab, rows);
+      return rows;
+    }
+    const rawRows = await fetchSheet(tab);
+    const rows = preprocessRows(rawRows);
+    GM_setValue(dk, JSON.stringify(rows));
+    GM_setValue(tk, Date.now());
+    memCache.set(tab, rows);
+    return rows;
   };
 
   /**
@@ -208,12 +323,12 @@
     const idx = buildIdx(rows);
     const ni = idx['Name'];
     if (ni === undefined) return null;
-    const target = normName(name);
-    const base = normName(stripEdition(name));
-    return rows.slice(1).find((r) => {
-      const n = normName(r[ni]);
-      return n === target || (base !== target && n === base);
-    }) ?? null;
+    const target = canonicalWeaponKey(name);
+    const matches = rows.slice(1).filter((r) => canonicalWeaponKey(r[ni]) === target);
+    if (!matches.length) return null;
+    return matches.reduce((best, row) =>
+      isBetterRow(row, idx, best, idx) ? row : best
+    );
   };
 
   /**
@@ -227,9 +342,9 @@
       name: g('Name').split('\n')[0].trim(),
       energy: g('Energy'),
       frame: g('Frame'),
-      barrel: g('PERKS Barrel'),
+      barrel: getCol(row, idx, 'PERKS Barrel', 'Barrel'),
       mag: g('Mag'),
-      perk1: g('Perk 1'),
+      perk1: getCol(row, idx, 'Perk 1', 'PERKS Perk 1'),
       perk2: g('Perk 2'),
       origin: g('Origin Trait'),
       notes: g('ANALYSIS Notes'),
@@ -257,7 +372,8 @@
   };
 
   /**
-   * Fetch all sheet tabs in parallel and return the first one containing the weapon.
+   * Fetch all sheet tabs in parallel and return the best match across all tabs.
+   * Handles weapons that appear in multiple tabs (e.g. High Albedo in Sidearms + Rocket Sidearms).
    * @param {string} name
    * @param {() => boolean} stale
    * @returns {Promise<{rows: string[][], row: string[], tab: string}|null>}
@@ -265,12 +381,18 @@
   const findWeapon = async (name, stale) => {
     const results = await Promise.allSettled(ALL_TABS.map(getSheet));
     if (stale()) return null;
+    let best = null;
     for (let i = 0; i < ALL_TABS.length; i++) {
       if (results[i].status !== 'fulfilled') continue;
-      const row = findRow(results[i].value, name);
-      if (row) return { rows: results[i].value, row, tab: ALL_TABS[i] };
+      const rows = results[i].value;
+      const row = findRow(rows, name);
+      if (!row) continue;
+      const idx = buildIdx(rows);
+      if (!best || isBetterRow(row, idx, best.row, buildIdx(best.rows))) {
+        best = { rows, row, tab: ALL_TABS[i] };
+      }
     }
-    return null;
+    return best;
   };
 
   /**
@@ -328,13 +450,48 @@
     return el;
   };
 
-  const fmtPerks = (raw) =>
-    (raw ?? '').split('\n').map((s) => s.trim()).filter(Boolean).join(' / ');
-
   const sectionBox = (title) => {
     const box = aegisEl('div', 'aegis-section');
     box.appendChild(makeEl('div', { className: 'aegis-section-header', textContent: title }));
     return box;
+  };
+
+  /**
+   * Update DIM's filter input in a React-compatible way.
+   * @param {string} query
+   */
+  const setSearch = (query) => {
+    const input = document.querySelector('input[name="filter"]');
+    if (!input) return;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(input, query);
+    else input.value = query;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.focus();
+  };
+
+  /**
+   * Render a newline-separated perk string as individually clickable spans.
+   * Each span fires exactperk:"<name>" in the DIM search bar on click.
+   * @param {string} raw
+   * @returns {DocumentFragment}
+   */
+  const renderPerkSpans = (raw) => {
+    const perks = (raw ?? '').split('\n').map((s) => s.trim()).filter(Boolean);
+    const frag = document.createDocumentFragment();
+    perks.forEach((perk, i) => {
+      if (i > 0) frag.appendChild(document.createTextNode(' / '));
+      const span = document.createElement('span');
+      span.textContent = perk;
+      span.className = 'aegis-clickable';
+      span.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setSearch(`exactperk:"${perk}"`);
+      });
+      frag.appendChild(span);
+    });
+    return frag;
   };
 
   /**
@@ -390,13 +547,14 @@
       ['Perk 2', weapon.perk2],
       ['Origin', weapon.origin],
     ]) {
-      const value = fmtPerks(raw);
-      if (!value) continue;
+      const perks = (raw ?? '').split('\n').map((s) => s.trim()).filter(Boolean);
+      if (!perks.length) continue;
       const row = makeEl('div', { className: 'aegis-row' });
       const lbl = makeEl('span', { className: 'aegis-label', textContent: label });
       lbl.style.width = '48px';
-      const val = makeEl('span', { textContent: value });
+      const val = makeEl('span');
       val.style.cssText = 'flex:1; overflow-wrap:break-word;';
+      val.appendChild(renderPerkSpans(raw));
       row.appendChild(lbl);
       row.appendChild(val);
       perksBox.appendChild(row);
@@ -409,7 +567,15 @@
       const row = makeEl('div', { className: 'aegis-sup-row' });
       const left = makeEl('span', { className: 'aegis-sup-left' });
       left.appendChild(makeEl('span', { className: 'aegis-sup-label', textContent: labelText }));
-      left.appendChild(makeEl('span', { className: `aegis-sup-name${isSelf ? ' aegis-highlight' : ''}`, textContent: w.name }));
+      const nameEl = makeEl('span', {
+        className: `aegis-sup-name aegis-clickable${isSelf ? ' aegis-highlight' : ''}`,
+        textContent: w.name,
+      });
+      nameEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setSearch(`exactname:"${w.name}"`);
+      });
+      left.appendChild(nameEl);
       row.appendChild(left);
       row.appendChild(makeEl('span', { className: 'aegis-muted', textContent: `${w.tier} #${w.rank}` }));
       supBox.appendChild(row);
@@ -421,6 +587,25 @@
 
     perksSection.after(perksBox);
     if (supBox.children.length > 1) perksBox.after(supBox);
+  };
+
+  /**
+   * Translate the tabpanel container up if the popup extends below the viewport.
+   * Resets any previous transform before measuring so calculations are accurate.
+   * @param {Element} popup
+   */
+  const adjustPopupPosition = (popup) => {
+    const tabpanel = popup.querySelector('[role="tabpanel"]');
+    if (!tabpanel) return;
+    const container = tabpanel.parentNode;
+    if (!(container instanceof HTMLElement)) return;
+    container.style.transform = '';
+    requestAnimationFrame(() => {
+      const overflow = popup.getBoundingClientRect().bottom - window.innerHeight;
+      if (overflow > 0) {
+        container.style.transform = `translateY(-${overflow}px)`;
+      }
+    });
   };
 
   const triggerMap = new WeakMap();
@@ -436,6 +621,11 @@
     const stale = () => triggerMap.get(popup) !== tid;
 
     popup.querySelectorAll(`[${AEGIS_ATTR}]`).forEach((el) => el.remove());
+    // Reset any position transform from a previous injection
+    const prevTabpanel = popup.querySelector('[role="tabpanel"]');
+    if (prevTabpanel?.parentNode instanceof HTMLElement) {
+      prevTabpanel.parentNode.style.transform = '';
+    }
 
     if (!isOverviewActive(popup)) return;
 
@@ -452,6 +642,7 @@
     injectBadges(popup, weapon);
     injectNote(popup, weapon);
     injectPerksAndSuperiors(popup, weapon, sup, found.tab, info.energy, info.frame);
+    adjustPopupPosition(popup);
   };
 
   let contentObs = null, debounceTimer = null;
