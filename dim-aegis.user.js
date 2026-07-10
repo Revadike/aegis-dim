@@ -2,7 +2,7 @@
 // @name         DIM Aegis Overlay
 // @namespace    Revadike
 // @author       Revadike
-// @version      1.3.0
+// @version      1.4.0
 // @description  Overlays Aegis weapon tier list data on DIM item popups
 // @match        https://app.destinyitemmanager.com/*
 // @match        https://beta.destinyitemmanager.com/*
@@ -32,11 +32,13 @@
     'Swords', 'Other',
   ];
 
+  const ARCHETYPES_TAB = 'Archetypes';
+
   const ENERGY_TYPES = ['Kinetic', 'Stasis', 'Solar', 'Arc', 'Void', 'Strand'];
 
   // Invalidate cached sheet data when script version changes
   if (GM_getValue('aegis_version', null) !== SCRIPT_VERSION) {
-    for (const tab of ALL_TABS) {
+    for (const tab of [...ALL_TABS, ARCHETYPES_TAB]) {
       GM_setValue(`aegis_data_${tab}`, null);
       GM_setValue(`aegis_ts_${tab}`, 0);
     }
@@ -78,6 +80,34 @@
     }
     .aegis-note strong {
       color: var(--theme-accent-primary, #e8a534);
+    }
+    .aegis-archetype-note {
+      color: var(--theme-text-secondary, #aaa);
+      font-size: 11px;
+      line-height: 1.4;
+      margin-top: 2px;
+    }
+    .aegis-archetype-anchor {
+      display: inline-block;
+      position: relative;
+      width: 0;
+      height: 0;
+      line-height: 0;
+      font-size: 0;
+      vertical-align: middle;
+    }
+    .aegis-archetype-badge-wrap {
+      position: absolute;
+      left: 5px;
+      top: 50%;
+      transform: translateY(-60%);
+      white-space: nowrap;
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+    }
+    .item-popup div[class*="ItemPopup-m_desktopPopupBody"] {
+      width: 360px !important;
     }
     .aegis-section {
       padding: 5px 8px;
@@ -202,6 +232,49 @@
   };
 
   /**
+   * DIM weapon-type labels that don't literally match the Archetypes sheet's
+   * "Weapon" column and need an explicit rename before comparison.
+   */
+  const WEAPON_TYPE_ALIASES = {
+    'combat bow': 'bow',
+    'submachine gun': 'smg',
+  };
+
+  /**
+   * Normalize a weapon-type string for comparison against the Archetypes sheet:
+   * lowercase + trim, apply known DIM->sheet renames, and drop a trailing
+   * " - <loading style>" qualifier (e.g. sheet's "Grenade launcher - breech" /
+   * "- drum" both collapse to "grenade launcher", matching DIM's single
+   * "Grenade Launcher" type - loading style is disambiguated via the frame instead).
+   */
+  const normWeaponType = (s) => {
+    let key = (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+    key = key.replace(/\s+-\s+.*$/, '');
+    return WEAPON_TYPE_ALIASES[key] ?? key;
+  };
+
+  /**
+   * Normalize an archetype/frame name for comparison against the Archetypes sheet:
+   * - keep only the first line (the sheet sometimes has an irrelevant 2nd line,
+   *   e.g. "High-Impact\nHeavy Bolts" or "Adaptive\nPack Hunter")
+   * - strip bracketed/parenthetical suffixes, e.g. "Disruption Weapon [Shield-Piercing]"
+   * - strip filler words DIM/the sheet append inconsistently: "frame", "heat",
+   *   "weapon", "glaive", "sword" (e.g. "Dynamic Heat Weapon" -> "Dynamic",
+   *   "Wave Sword Frame" -> "Wave", "Aggressive Glaive" -> "Aggressive")
+   * - normalize hyphens to spaces so "Rapid-Fire" and "Rapid Fire" match
+   * - collapse whitespace, trim, lowercase
+   * e.g. "Lightweight Frame" -> "lightweight", "High-Impact\nHeavy Bolts" -> "high impact"
+   */
+  const normFrameName = (s) => {
+    let v = (s ?? '').split('\n')[0] ?? '';
+    v = v.replace(/\[[^\]]*\]/g, ' ');
+    v = v.replace(/\([^)]*\)/g, ' ');
+    v = v.replace(/\b(frame|heat|weapon|glaive|sword)\b/gi, ' ');
+    v = v.replace(/-/g, ' ');
+    return v.replace(/\s+/g, ' ').trim().toLowerCase();
+  };
+
+  /**
    * Get a column value by trying multiple possible column name variants.
    * Handles sheets where headers differ (e.g. "Perk 1" vs "PERKS Perk 1").
    * @param {string[]} row
@@ -256,6 +329,7 @@
    * Rows are sorted by rank (ascending, unranked last), then fields are filled in from
    * subsequent rows wherever the base row has an empty cell. This handles the common
    * pattern where one entry has rank/tier and another has the actual perk data.
+   * Sheets without a "Name" column (e.g. Archetypes) are returned unchanged.
    * @param {string[][]} rows
    * @returns {string[][]}
    */
@@ -329,6 +403,28 @@
     return matches.reduce((best, row) =>
       isBetterRow(row, idx, best, idx) ? row : best
     );
+  };
+
+  /**
+   * Find the Archetypes sheet row matching both weapon type and frame archetype.
+   * Weapon type is compared lowercase/trimmed; frame is compared with the word
+   * "frame" stripped, newlines collapsed to spaces, then lowercase/trimmed.
+   * @param {string[][]} rows
+   * @param {Record<string,number>} idx
+   * @param {string} weaponType
+   * @param {string} frameName
+   * @returns {string[]|null}
+   */
+  const findArchetypeRow = (rows, idx, weaponType, frameName) => {
+    if (!rows || rows.length < 2) return null;
+    const wi = idx['Weapon'], fi = idx['Frame'];
+    if (wi === undefined || fi === undefined) return null;
+    const targetWeapon = normWeaponType(weaponType);
+    const targetFrame = normFrameName(frameName);
+    if (!targetWeapon || !targetFrame) return null;
+    return rows.slice(1).find((r) =>
+      normWeaponType(r[wi]) === targetWeapon && normFrameName(r[fi]) === targetFrame
+    ) ?? null;
   };
 
   /**
@@ -425,6 +521,22 @@
     }
 
     return { name, energy, frame };
+  };
+
+  /**
+   * Extract the weapon type label and archetype/frame name+element used to
+   * look up the Archetypes sheet (Weapon + Frame columns).
+   * @param {Element} popup
+   * @returns {{ weaponType: string, frameName: string, nameEl: Element }|null}
+   */
+  const extractArchetypeInfo = (popup) => {
+    const typeEl = popup.querySelector('div[class*="itemType"]');
+    const nameEl = popup.querySelector('div[class*="ArchetypeSocket-m_name"]');
+    if (!typeEl || !nameEl) return null;
+    const weaponType = typeEl.textContent?.trim() ?? '';
+    const frameName = nameEl.textContent?.trim() ?? '';
+    if (!weaponType || !frameName) return null;
+    return { weaponType, frameName, nameEl };
   };
 
   /**
@@ -590,6 +702,44 @@
   };
 
   /**
+   * Inject the archetype tier chip next to the archetype/frame name, and replace
+   * the rpm/impact stats line with the Aegis analysis notes for that archetype.
+   * @param {{ nameEl: Element }} archInfo
+   * @param {string[]} row - Matched Archetypes sheet row
+   * @param {Record<string,number>} idx - Archetypes sheet column index
+   */
+  const injectArchetypeOverlay = (archInfo, row, idx) => {
+    const { nameEl } = archInfo;
+    const tier = (row[idx['Tier']] ?? '').trim();
+    const notes = (row[idx['ANALYSIS Notes']] ?? '').trim();
+
+    if (tier) {
+      // A zero-size, zero-line-height anchor holds the actual badge out of
+      // flow via absolute positioning, so it sits right after the name text
+      // (same size/alignment/position as before) without growing the line box.
+      const anchor = aegisEl('span', 'aegis-archetype-anchor');
+      const chipWrap = makeEl('span', { className: 'aegis-archetype-badge-wrap' });
+      chipWrap.appendChild(makeEl('span', { className: 'aegis-badge aegis-badge-tier', textContent: `${tier}-tier` }));
+      anchor.appendChild(chipWrap);
+      nameEl.appendChild(anchor);
+      nameEl.style.overflow = 'visible';
+    }
+
+    const infoContainer = nameEl.parentElement;
+    if (!infoContainer) return;
+
+    // Remove the existing "450 rpm / 27 impact" style stats line, if present
+    const statsEl = infoContainer.querySelector('div[class*="ItemSocketsWeapons-m_stats"]');
+    statsEl?.remove();
+
+    if (notes) {
+      const noteEl = aegisEl('div', 'aegis-archetype-note');
+      noteEl.textContent = notes;
+      infoContainer.appendChild(noteEl);
+    }
+  };
+
+  /**
    * Translate the tabpanel container up if the popup extends below the viewport.
    * Resets any previous transform before measuring so calculations are accurate.
    * @param {Element} popup
@@ -630,18 +780,31 @@
     if (!isOverviewActive(popup)) return;
 
     const info = extractWeaponInfo(popup);
-    if (!info?.name) return;
+    const archInfo = extractArchetypeInfo(popup);
 
-    const found = await findWeapon(info.name, stale);
-    if (stale() || !found || !document.contains(popup)) return;
+    const [found, archRows] = await Promise.all([
+      info?.name ? findWeapon(info.name, stale) : Promise.resolve(null),
+      archInfo ? getSheet(ARCHETYPES_TAB).catch(() => null) : Promise.resolve(null),
+    ]);
 
-    const idx = buildIdx(found.rows);
-    const weapon = rowToWeapon(found.row, idx);
-    const sup = findSuperiors(found.rows, weapon);
+    if (stale() || !document.contains(popup)) return;
 
-    injectBadges(popup, weapon);
-    injectNote(popup, weapon);
-    injectPerksAndSuperiors(popup, weapon, sup, found.tab, info.energy, info.frame);
+    if (found) {
+      const idx = buildIdx(found.rows);
+      const weapon = rowToWeapon(found.row, idx);
+      const sup = findSuperiors(found.rows, weapon);
+
+      injectBadges(popup, weapon);
+      injectNote(popup, weapon);
+      injectPerksAndSuperiors(popup, weapon, sup, found.tab, info.energy, info.frame);
+    }
+
+    if (archInfo && archRows) {
+      const archIdx = buildIdx(archRows);
+      const archRow = findArchetypeRow(archRows, archIdx, archInfo.weaponType, archInfo.frameName);
+      if (archRow) injectArchetypeOverlay(archInfo, archRow, archIdx);
+    }
+
     adjustPopupPosition(popup);
   };
 
