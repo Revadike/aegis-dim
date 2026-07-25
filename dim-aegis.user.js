@@ -2,7 +2,7 @@
 // @name         DIM Aegis Overlay
 // @namespace    Revadike
 // @author       Revadike
-// @version      1.4.0
+// @version      1.4.1
 // @description  Overlays Aegis weapon tier list data on DIM item popups
 // @match        https://app.destinyitemmanager.com/*
 // @match        https://beta.destinyitemmanager.com/*
@@ -291,7 +291,7 @@
 
   /** Rank as a number; Infinity when the cell is blank. */
   const getRowRank = (row, idx) => {
-    const s = (row[idx['Rank']] ?? '').trim();
+    const s = (row[idx['\#']] ?? '').trim();
     return s ? Number(s) : Infinity;
   };
 
@@ -444,7 +444,7 @@
       perk2: g('Perk 2'),
       origin: g('Origin Trait'),
       notes: g('ANALYSIS Notes'),
-      rank: g('Rank'),
+      rank: g('\#'),
       tier: g('Tier'),
     };
   };
