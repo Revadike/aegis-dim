@@ -291,7 +291,7 @@
 
   /** Rank as a number; Infinity when the cell is blank. */
   const getRowRank = (row, idx) => {
-    const s = (row[idx['Rank']] ?? '').trim();
+    const s = (row[idx['\#']] ?? '').trim();
     return s ? Number(s) : Infinity;
   };
 
