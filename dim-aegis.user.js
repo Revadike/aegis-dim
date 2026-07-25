@@ -2,7 +2,7 @@
 // @name         DIM Aegis Overlay
 // @namespace    Revadike
 // @author       Revadike
-// @version      1.4.0
+// @version      1.4.1
 // @description  Overlays Aegis weapon tier list data on DIM item popups
 // @match        https://app.destinyitemmanager.com/*
 // @match        https://beta.destinyitemmanager.com/*
