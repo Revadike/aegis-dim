@@ -444,7 +444,7 @@
       perk2: g('Perk 2'),
       origin: g('Origin Trait'),
       notes: g('ANALYSIS Notes'),
-      rank: g('Rank'),
+      rank: g('\#'),
       tier: g('Tier'),
     };
   };
