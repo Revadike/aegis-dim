@@ -6,6 +6,7 @@
 // @description  Overlays Aegis weapon tier list data on DIM item popups
 // @match        https://app.destinyitemmanager.com/*
 // @match        https://beta.destinyitemmanager.com/*
+// @match        https://pr.destinyitemmanager.com/*
 // @downloadURL  https://raw.githubusercontent.com/Revadike/aegis-dim/master/dim-aegis.user.js
 // @updateURL    https://raw.githubusercontent.com/Revadike/aegis-dim/master/dim-aegis.user.js
 // @grant        GM_setValue
