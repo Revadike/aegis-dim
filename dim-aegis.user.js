@@ -25,6 +25,7 @@
   const SHEET_ID = '1JM-0SlxVDAi-C6rGVlLxa-J1WGewEeL8Qvq4htWZHhY';
   const CACHE_TTL = 24 * 60 * 60 * 1000;
   const AEGIS_ATTR = 'data-dim-aegis';
+  const SECTION_STATE_PREFIX = 'aegis_section_open_';
 
   const ALL_TABS = [
     'Autos', 'Bows', 'HCs', 'Pulses', 'Scouts', 'Sidearms', 'SMGs',
@@ -126,6 +127,7 @@
       color: var(--theme-accent-primary, #e8a534);
       text-transform: uppercase;
       margin-bottom: 3px;
+      cursor: pointer;
     }
     .aegis-row {
       display: flex;
@@ -563,9 +565,17 @@
     return el;
   };
 
-  const sectionBox = (title) => {
-    const box = aegisEl('div', 'aegis-section');
-    box.appendChild(makeEl('div', { className: 'aegis-section-header', textContent: title }));
+  const sectionBox = (title, sectionKey = title) => {
+    const box = aegisEl('details', 'aegis-section');
+    const stateKey = `${SECTION_STATE_PREFIX}${sectionKey}`;
+    
+    // Default sections to open unless user collapsed them before.
+    box.open = GM_getValue(stateKey, true);
+    box.addEventListener('toggle', () => {
+      GM_setValue(stateKey, box.open);
+    });
+    
+    box.appendChild(makeEl('summary', { className: 'aegis-section-header', textContent: title }));
     return box;
   };
 
@@ -652,7 +662,7 @@
     const perksSection = perksBtn?.parentElement;
     if (!perksSection) return;
 
-    const perksBox = sectionBox('Aegis Recommended Perks');
+    const perksBox = sectionBox('Aegis Recommended Perks', 'recommended_perks');
     for (const [label, raw] of [
       ['Barrel', weapon.barrel],
       ['Mag', weapon.mag],
@@ -673,7 +683,7 @@
       perksBox.appendChild(row);
     }
 
-    const supBox = sectionBox(`Best in ${tab}`);
+    const supBox = sectionBox(`Best in ${tab}`, 'best_in');
     const addSupEntry = (labelText, w) => {
       if (!w) return;
       const isSelf = normName(w.name) === normName(weapon.name);
