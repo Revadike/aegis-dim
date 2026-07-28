@@ -564,8 +564,8 @@
   };
 
   const sectionBox = (title) => {
-    const box = aegisEl('div', 'aegis-section');
-    box.appendChild(makeEl('div', { className: 'aegis-section-header', textContent: title }));
+    const box = aegisEl('details', 'aegis-section');
+    box.appendChild(makeEl('summary', { className: 'aegis-section-header', textContent: title }));
     return box;
   };
 
