@@ -127,6 +127,7 @@
       color: var(--theme-accent-primary, #e8a534);
       text-transform: uppercase;
       margin-bottom: 3px;
+      cursor: pointer;
     }
     .aegis-row {
       display: flex;
